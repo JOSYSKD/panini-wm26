@@ -436,12 +436,13 @@ main{max-width:1120px; margin:0 auto; padding:14px 14px 0}
     <button class="btn" id="btnScanMore">➕ Foto dazu</button>
     <button class="btn pri" id="btnScanApply">Übernehmen ✓</button>
   </div>
+  <button class="btn" id="btnScanUpgrade" style="display:none;margin-top:9px;width:100%;font-size:12.5px;padding:10px;color:var(--ink-2)">🎯 Zu ungenau? KI-Scan aktivieren (optional, genauer)</button>
 </div>
 
 <div class="sheet" id="sheet-key">
   <div class="grip"></div>
-  <h2>🔑 Scanner-Schlüssel</h2>
-  <p class="lead">Zum Scannen brauchst du einen Anthropic-API-Key. Hol dir einen gratis auf <b>console.anthropic.com</b>. Er bleibt nur auf deinem Gerät gespeichert.</p>
+  <h2>🔑 KI-Scan aktivieren</h2>
+  <p class="lead"><b>Ganz optional!</b> Das Scannen läuft auch <b>gratis</b> direkt auf deinem Handy (Texterkennung). Ein Anthropic-API-Key macht das Erkennen nur noch <b>genauer</b>. Key gratis anlegen auf <b>console.anthropic.com</b> (kostet pro Foto nur Bruchteile eines Cents) – er bleibt nur auf deinem Gerät.</p>
   <input type="password" id="keyInput" placeholder="sk-ant-…" autocomplete="off">
   <div class="sheet-actions">
     <button class="btn danger" id="btnKeyDel">Löschen</button>
@@ -468,7 +469,7 @@ main{max-width:1120px; margin:0 auto; padding:14px 14px 0}
   <div class="field" style="margin-top:10px"><textarea id="backupText" class="mono" placeholder="WM26.… hier einfügen zum Laden"></textarea></div>
   <div id="keyManageWrap" style="display:none">
     <div class="divider"></div>
-    <div class="btn-row"><button class="btn" id="btnKeyManage">🔑 Scanner-Schlüssel verwalten</button></div>
+    <div class="btn-row"><button class="btn" id="btnKeyManage">🔑 KI-Scan verwalten (optional)</button></div>
   </div>
   <div class="divider"></div>
   <div class="btn-row"><button class="btn danger" id="btnReset">🗑️ Alles zurücksetzen</button></div>
@@ -979,8 +980,8 @@ el('btnReset').addEventListener('click',()=>{
 /* Key verwalten */
 el('btnKeyManage').addEventListener('click',()=>{closeSheet();setTimeout(()=>openSheet('sheet-key'),200);});
 el('keyInput').value='';
-el('btnKeySave').addEventListener('click',()=>{const v=el('keyInput').value.trim();if(!v){toast('Bitte Key eingeben');return;}state.apiKey=v;saveNow();closeSheet();toast('🔑 Schlüssel gespeichert');});
-el('btnKeyDel').addEventListener('click',()=>{state.apiKey='';el('keyInput').value='';saveNow();toast('Schlüssel gelöscht');});
+el('btnKeySave').addEventListener('click',()=>{const v=el('keyInput').value.trim();if(!v){toast('Bitte Key eingeben');return;}state.apiKey=v;saveNow();closeSheet();toast('🔑 KI-Scan aktiv – Scans sind jetzt genauer ✨');});
+el('btnKeyDel').addEventListener('click',()=>{state.apiKey='';el('keyInput').value='';saveNow();toast('Gelöscht – Scannen läuft weiter gratis 👍');});
 
 /* =================== HAB ICH SCHON =================== */
 el('btnHave').addEventListener('click',()=>{el('haveText').value='';openSheet('sheet-have');});
@@ -1006,6 +1007,26 @@ const PROMPT_BACKS='Dieses Foto zeigt die Rückseiten von Panini-WM-2026-Sticker
 const PROMPT_PAGE='Dieses Foto zeigt eine Albumseite des Panini WM 2026 Stickeralbums. Bestimme pro sichtbarem Team, welche Slot-Nummern BEKLEBT (gefüllt) sind. Leere Slots zeigen ihr Nummern-Label; beklebte Slots verdecken die Nummer – leite die Nummer aus der Anordnung/dem Raster ab. Gültige Team-Kürzel: '+CODES+'. Antworte NUR mit rohem JSON, ohne Erklärung: {"pages":[{"team":"GER","filled":[1,2,5]}],"unreadable":0}.';
 
 let scanAbort=null,statusTimer=null,scanMode='backs';
+/* Engine: in Claude ist KI gratis; sonst KI nur wenn (optionaler) Key da ist, sonst Gratis-Texterkennung */
+function scanEngine(){if(isClaudeEnv)return 'ai';return state.apiKey?'ai':'free';}
+/* Gratis On-Device-OCR via Tesseract.js (lädt einmalig vom CDN, danach vom Browser gecacht) */
+const OCR_CDN='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+let tesseractLoading=null,ocrWorker=null;
+function loadTesseract(){
+  if(window.Tesseract)return Promise.resolve(window.Tesseract);
+  if(tesseractLoading)return tesseractLoading;
+  tesseractLoading=new Promise((res,rej)=>{const s=document.createElement('script');s.src=OCR_CDN;s.async=true;
+    s.onload=()=>window.Tesseract?res(window.Tesseract):rej(new Error('cdn'));s.onerror=()=>rej(new Error('cdn'));document.head.appendChild(s);});
+  return tesseractLoading;
+}
+async function ocrImage(dataUrl){
+  const T=await loadTesseract();
+  ocrWorker=await T.createWorker('eng');
+  try{await ocrWorker.setParameters({tessedit_char_whitelist:'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ',tessedit_pageseg_mode:'11'});}catch(e){}
+  const {data}=await ocrWorker.recognize(dataUrl);
+  try{await ocrWorker.terminate();}catch(e){}ocrWorker=null;
+  return (data&&data.text)||'';
+}
 function resolveCode(c){const id=String(c||'').toLowerCase();if(TEAM_IDS.has(id))return id;if(ALIASES[id])return ALIASES[id];return null;}
 function fileToResized(file){return new Promise((res,rej)=>{
   const img=new Image();const url=URL.createObjectURL(file);
@@ -1030,23 +1051,20 @@ async function requestVision(base64,prompt){
   throw lastErr||new Error('fail');
 }
 function parseVisionJSON(text){const m=text.match(/\{[\s\S]*\}/);if(!m)throw new Error('nojson');return JSON.parse(m[0]);}
-const SCAN_STATUS=['Foto wird analysiert …','Codes werden gelesen …','Sticker werden erkannt …','Gleich fertig …'];
-function showScanOverlay(dataUrl){el('scanImg').src=dataUrl;el('scanOverlay').classList.add('on');let i=0;el('scanStatus').textContent=SCAN_STATUS[0];
-  statusTimer=setInterval(()=>{i=(i+1)%SCAN_STATUS.length;el('scanStatus').textContent=SCAN_STATUS[i];},1400);}
+const SCAN_STATUS_AI=['Foto wird analysiert …','Codes werden gelesen …','KI erkennt Sticker …','Gleich fertig …'];
+const SCAN_STATUS_FREE=['Texterkennung startet …','Foto wird gelesen …','Sticker-Codes suchen …','Gleich fertig …'];
+function showScanOverlay(dataUrl,engine){el('scanImg').src=dataUrl;el('scanOverlay').classList.add('on');
+  const set=engine==='free'?SCAN_STATUS_FREE:SCAN_STATUS_AI;let i=0;el('scanStatus').textContent=set[0];
+  clearInterval(statusTimer);statusTimer=setInterval(()=>{i=(i+1)%set.length;el('scanStatus').textContent=set[i];},1400);}
 function hideScanOverlay(){el('scanOverlay').classList.remove('on');clearInterval(statusTimer);}
-el('scanCancel').addEventListener('click',()=>{if(scanAbort)scanAbort.abort();hideScanOverlay();toast('Scan abgebrochen');});
+el('scanCancel').addEventListener('click',()=>{if(scanAbort)scanAbort.abort();if(ocrWorker){try{ocrWorker.terminate();}catch(e){}ocrWorker=null;}hideScanOverlay();toast('Scan abgebrochen');});
 
-function needKeyThenRun(run){
-  if(isClaudeEnv){run();return;}
-  if(state.apiKey){run();return;}
-  pendingScan=run;openSheet('sheet-key');toast('🔑 Einmal Schlüssel eintragen, dann geht der Scanner');
-}
-let pendingScan=null;
-function startScan(mode){scanMode=mode;needKeyThenRun(()=>{ (mode==='album'?el('fileAlbumPage'):el('fileGal')).click(); });}
-el('fabScan').addEventListener('click',()=>{scanMode='backs';needKeyThenRun(()=>el('fileCam').click());});
-el('fabGallery').addEventListener('click',()=>{scanMode='backs';needKeyThenRun(()=>el('fileGal').click());});
-el('btnScanMore').addEventListener('click',()=>{scanMode='backs';needKeyThenRun(()=>el('fileGal').click());});
-el('btnScanPage').addEventListener('click',()=>startScan('album'));
+/* Scannen ist immer gratis nutzbar – FAB/Galerie starten eine frische Session, „Foto dazu" stapelt */
+el('fabScan').addEventListener('click',()=>{state.scanRows=[];el('fileCam').click();});
+el('fabGallery').addEventListener('click',()=>{state.scanRows=[];el('fileGal').click();});
+el('btnScanMore').addEventListener('click',()=>{el('fileGal').click();});
+el('btnScanPage').addEventListener('click',()=>el('fileAlbumPage').click());
+el('btnScanUpgrade').addEventListener('click',()=>openSheet('sheet-key'));
 
 el('fileCam').addEventListener('change',e=>handleFile(e,'backs'));
 el('fileGal').addEventListener('change',e=>handleFile(e,'backs'));
@@ -1055,16 +1073,27 @@ el('fileAlbumPage').addEventListener('change',e=>handleFile(e,'album'));
 async function handleFile(e,mode){
   const file=e.target.files&&e.target.files[0];e.target.value='';if(!file)return;
   let img;try{img=await fileToResized(file);}catch(err){toast('Bild konnte nicht geladen werden');return;}
-  showScanOverlay(img.dataUrl);
+  const engine=scanEngine();
+  showScanOverlay(img.dataUrl,engine);
   try{
-    const text=await requestVision(img.base64,mode==='album'?PROMPT_PAGE:PROMPT_BACKS);
-    const data=parseVisionJSON(text);
-    hideScanOverlay();
-    if(mode==='album')applyPageScan(data);else applyBackScan(data);
+    if(engine==='ai'){
+      const text=await requestVision(img.base64,mode==='album'?PROMPT_PAGE:PROMPT_BACKS);
+      const data=parseVisionJSON(text);hideScanOverlay();
+      if(mode==='album')applyPageScan(data);else applyBackScan(data);
+    }else{
+      const text=await ocrImage(img.dataUrl);hideScanOverlay();
+      if(mode==='album')applyPageScanFree(text);else applyBackScanFree(text);
+    }
   }catch(err){
+    if(err&&err.name==='AbortError'){hideScanOverlay();return;}
+    if(err&&err.auth){ /* KI-Key ungültig -> automatisch auf Gratis-Scan zurückfallen, gleiches Foto */
+      toast('🔑 Key ungültig – ich nutze jetzt den Gratis-Scan',2800);
+      try{el('scanStatus').textContent='Wechsle auf Gratis-Scan …';const text=await ocrImage(img.dataUrl);hideScanOverlay();
+        if(mode==='album')applyPageScanFree(text);else applyBackScanFree(text);return;}
+      catch(e2){hideScanOverlay();if(e2&&e2.message==='cdn'){toast('Gratis-Scanner lädt nicht (offline?) – tipp sie über ✅ Hab ich schon ein',4200);return;}toast('Scan hat nicht geklappt 😕',3000);return;}
+    }
     hideScanOverlay();
-    if(err.name==='AbortError')return;
-    if(err.auth){toast('🔑 Schlüssel ungültig – bitte neu eingeben');openSheet('sheet-key');return;}
+    if(err&&err.message==='cdn'){toast('Gratis-Scanner lädt nicht (offline?) – tipp sie über ✅ Hab ich schon ein',4200);return;}
     toast('Scan hat nicht geklappt 😕 Nochmal versuchen?',3000);
   }
 }
@@ -1089,6 +1118,27 @@ function applyPageScan(data){
   el('haveText').value=(cur?cur+'\n':'')+lines.join('\n');
   openSheet('sheet-have');toast('✓ Erkannt – kurz prüfen und „Eintragen"');
 }
+/* ---- Gratis-Scan (On-Device-Texterkennung) ---- */
+function applyBackScanFree(text){
+  const before=state.scanRows.length;
+  const {entries}=parseStickerText(text);
+  for(const en of entries)state.scanRows.push({id:en.id,num:String(en.num),ignored:false});
+  const added=state.scanRows.length-before;
+  if(!added){
+    if(!before){toast('Nichts klar erkannt 😕 Näher ran & mehr Licht – oder tipp sie über ✅ Hab ich schon ein',4500);return;}
+    toast('In dem Foto nichts Neues erkannt 🤔');
+  }
+  renderScanRows();openSheet('sheet-scan');
+}
+function applyPageScanFree(text){
+  const {entries}=parseStickerText(text);
+  if(!entries.length){toast('Auf der Seite nichts klar erkannt – tipp die Nummern kurz selbst ein 🙂',4500);return;}
+  const byTeam={};for(const en of entries){(byTeam[en.id]=byTeam[en.id]||new Set()).add(String(parseInt(en.num,10)));}
+  const lines=[];for(const t of TEAMS)if(byTeam[t.id])lines.push(t.id.toUpperCase()+' '+[...byTeam[t.id]].join(', '));
+  const cur=el('haveText').value.trim();
+  el('haveText').value=(cur?cur+'\n':'')+lines.join('\n');
+  openSheet('sheet-have');toast('✓ Erkannt – kurz prüfen und „Eintragen"');
+}
 function classifyRows(){
   const seen={};
   return state.scanRows.map(r=>{
@@ -1107,6 +1157,7 @@ function renderScanRows(){
   const rows=classifyRows();const wrap=el('scanRows');
   let nw=0,dp=0,un=0;rows.forEach(r=>{if(r.ignored||r.unreadable){if(r.unreadable&&!r.ignored)un++;return;}if(r.badge==='new')nw++;else dp++;});
   el('scanLead').innerHTML='<b>'+nw+'</b> neu ✨ · <b>'+dp+'</b> doppelt 🔁'+(un?' · '+un+' unlesbar':'')+' — tippe zum Korrigieren, ✕ ignoriert.';
+  el('btnScanUpgrade').style.display=(scanEngine()==='free'&&!isClaudeEnv)?'':'none';
   wrap.innerHTML=rows.map((r,i)=>{
     const bd=r.unreadable?'<span class="bdg unr">???</span>':(r.ignored?'':(r.badge==='new'?'<span class="bdg new">NEU! ✨</span>':'<span class="bdg dup">DOPPELT</span>'));
     return `<div class="srow${r.ignored?' ig':''}" data-i="${i}">
@@ -1151,17 +1202,11 @@ function openSheet(id){closeSheet();curSheet=id;
   if(id==='sheet-key')el('keyInput').value=state.apiKey||'';
   el('backdrop').classList.add('on');el(id).classList.add('on');
 }
-function closeSheet(){document.querySelectorAll('.sheet.on').forEach(s=>s.classList.remove('on'));el('backdrop').classList.remove('on');
-  if(curSheet==='sheet-scan')state.scanRows=[];curSheet=null;
-  if(pendingScan&&!state.apiKey){}
-}
+function closeSheet(){document.querySelectorAll('.sheet.on').forEach(s=>s.classList.remove('on'));el('backdrop').classList.remove('on');curSheet=null;}
 el('backdrop').addEventListener('click',()=>{closeSheet();});
 document.querySelectorAll('.grip').forEach(g=>g.addEventListener('click',()=>closeSheet()));
 el('btnTradelist').addEventListener('click',()=>openSheet('sheet-trade'));
 el('btnTradelist2').addEventListener('click',()=>openSheet('sheet-trade'));
-/* nach Key-Speichern evtl. ausstehenden Scan starten */
-const _origKeySave=el('btnKeySave').onclick;
-el('btnKeySave').addEventListener('click',()=>{if(state.apiKey&&pendingScan){const p=pendingScan;pendingScan=null;setTimeout(p,250);}});
 
 /* Win-Overlay */
 el('btnMoreConfetti').addEventListener('click',()=>{if(!reduceMotion)Confetti.rain();vibrate(30);});
